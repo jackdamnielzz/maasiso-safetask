@@ -1,0 +1,216 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // ============================================================================
+    // HELPER FUNCTIONS
+    // ============================================================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user belongs to the organization
+    function isOrgMember(orgId) {
+      return isAuthenticated() && 
+             request.auth.token.orgId == orgId;
+    }
+    
+    // Check if user is admin for the organization
+    function isAdmin(orgId) {
+      return isOrgMember(orgId) && 
+             request.auth.token.role == 'admin';
+    }
+    
+    // Check if file size is within limits
+    function isValidSize(maxSizeMB) {
+      return request.resource.size < maxSizeMB * 1024 * 1024;
+    }
+    
+    // Check if file type is allowed (images)
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+    
+    // Check if file type is PDF
+    function isPDF() {
+      return request.resource.contentType == 'application/pdf';
+    }
+    
+    // Check if file type is allowed document
+    function isDocument() {
+      return request.resource.contentType.matches('application/pdf') ||
+             request.resource.contentType.matches('application/msword') ||
+             request.resource.contentType.matches('application/vnd.openxmlformats-officedocument.*');
+    }
+    
+    // ============================================================================
+    // ORGANIZATION FILES
+    // ============================================================================
+    
+    // Organization logos and branding
+    match /organizations/{orgId}/branding/{filename} {
+      // Only org members can read branding
+      allow read: if isOrgMember(orgId);
+      
+      // Only admins can upload/update branding (max 5MB)
+      allow create, update: if isAdmin(orgId) && 
+                                isImage() && 
+                                isValidSize(5);
+      
+      // Only admins can delete branding
+      allow delete: if isAdmin(orgId);
+    }
+    
+    // ============================================================================
+    // TRA ATTACHMENTS
+    // ============================================================================
+    
+    // TRA related documents and images
+    match /organizations/{orgId}/tras/{traId}/{filename} {
+      // All org members can read TRA attachments
+      allow read: if isOrgMember(orgId);
+      
+      // Authenticated org members can upload attachments
+      // Images: max 10MB, Documents: max 25MB
+      allow create: if isOrgMember(orgId) && (
+        (isImage() && isValidSize(10)) ||
+        (isDocument() && isValidSize(25))
+      );
+      
+      // Only the uploader or admins can update/delete
+      allow update, delete: if isOrgMember(orgId) && (
+        resource.metadata.uploadedBy == request.auth.uid ||
+        request.auth.token.role == 'admin'
+      );
+    }
+    
+    // ============================================================================
+    // LMRA SESSION PHOTOS
+    // ============================================================================
+    
+    // Photos captured during LMRA sessions
+    match /organizations/{orgId}/lmra/{sessionId}/photos/{filename} {
+      // All org members can read LMRA photos
+      allow read: if isOrgMember(orgId);
+      
+      // Authenticated org members can upload photos (max 10MB)
+      allow create: if isOrgMember(orgId) && 
+                       isImage() && 
+                       isValidSize(10);
+      
+      // Only the uploader or admins can delete photos
+      allow delete: if isOrgMember(orgId) && (
+        resource.metadata.uploadedBy == request.auth.uid ||
+        request.auth.token.role == 'admin'
+      );
+      
+      // Photos are immutable once uploaded
+      allow update: if false;
+    }
+    
+    // ============================================================================
+    // USER PROFILE PHOTOS
+    // ============================================================================
+    
+    // User profile pictures
+    match /users/{userId}/profile/{filename} {
+      // Anyone authenticated can read profile photos
+      allow read: if isAuthenticated();
+      
+      // Only the user themselves can upload/update their profile photo (max 5MB)
+      allow create, update: if isAuthenticated() && 
+                               request.auth.uid == userId && 
+                               isImage() && 
+                               isValidSize(5);
+      
+      // Only the user themselves or their org admin can delete
+      allow delete: if isAuthenticated() && (
+        request.auth.uid == userId ||
+        request.auth.token.role == 'admin'
+      );
+    }
+    
+    // ============================================================================
+    // TEMPLATE ATTACHMENTS
+    // ============================================================================
+    
+    // TRA template attachments (reference documents, images)
+    match /organizations/{orgId}/templates/{templateId}/{filename} {
+      // All org members can read template attachments
+      allow read: if isOrgMember(orgId);
+      
+      // Safety managers and admins can upload template attachments
+      allow create, update: if isOrgMember(orgId) && 
+                                request.auth.token.role in ['admin', 'safety_manager'] && (
+                                  (isImage() && isValidSize(10)) ||
+                                  (isDocument() && isValidSize(25))
+                                );
+      
+      // Only admins can delete template attachments
+      allow delete: if isAdmin(orgId);
+    }
+    
+    // ============================================================================
+    // GENERATED REPORTS
+    // ============================================================================
+    
+    // PDF reports generated by the system
+    match /organizations/{orgId}/reports/{reportId}/{filename} {
+      // All org members can read reports
+      allow read: if isOrgMember(orgId);
+      
+      // System (Cloud Functions) creates reports - users cannot directly upload
+      allow create: if false; // Created via Cloud Functions only
+      
+      // Reports are immutable
+      allow update: if false;
+      
+      // Only admins can delete reports
+      allow delete: if isAdmin(orgId);
+    }
+    
+    // ============================================================================
+    // EXPORTS (Data exports for GDPR compliance)
+    // ============================================================================
+    
+    // Data exports for users (GDPR right to data portability)
+    match /exports/{userId}/{filename} {
+      // Only the user can read their own exports
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      
+      // System creates exports via Cloud Functions
+      allow create: if false; // Created via Cloud Functions only
+      
+      // Exports are immutable
+      allow update: if false;
+      
+      // Users can delete their own exports
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // ============================================================================
+    // TEMPORARY UPLOADS
+    // ============================================================================
+    
+    // Temporary storage for file processing
+    match /temp/{userId}/{filename} {
+      // Only the user can read their temp files
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      
+      // Users can upload temp files (max 50MB) for processing
+      allow create: if isAuthenticated() && 
+                       request.auth.uid == userId && 
+                       isValidSize(50);
+      
+      // Users can update/delete their own temp files
+      allow update, delete: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Default deny for all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

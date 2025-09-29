@@ -1,0 +1,257 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============================================================================
+    // HELPER FUNCTIONS
+    // ============================================================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user belongs to the organization
+    function isOrgMember(orgId) {
+      return isAuthenticated() && 
+             request.auth.token.orgId == orgId;
+    }
+    
+    // Check if user is admin for the organization
+    function isAdmin(orgId) {
+      return isOrgMember(orgId) && 
+             request.auth.token.role == 'admin';
+    }
+    
+    // Check if user is safety manager or admin
+    function isSafetyManager(orgId) {
+      return isOrgMember(orgId) && 
+             request.auth.token.role in ['admin', 'safety_manager'];
+    }
+    
+    // Check if user is supervisor, safety manager, or admin
+    function isSupervisor(orgId) {
+      return isOrgMember(orgId) && 
+             request.auth.token.role in ['admin', 'safety_manager', 'supervisor'];
+    }
+    
+    // Check if user owns the resource
+    function isOwner(ownerId) {
+      return isAuthenticated() && 
+             request.auth.uid == ownerId;
+    }
+    
+    // Check if data is not being tampered with (for audit fields)
+    function isValidUpdate() {
+      return request.resource.data.createdAt == resource.data.createdAt &&
+             request.resource.data.createdBy == resource.data.createdBy;
+    }
+    
+    // ============================================================================
+    // ORGANIZATION COLLECTION
+    // ============================================================================
+    
+    match /organizations/{orgId} {
+      // Organization document - admins can read/write
+      allow read: if isOrgMember(orgId);
+      allow create: if isAuthenticated(); // User creates their first org
+      allow update, delete: if isAdmin(orgId);
+      
+      // ============================================================================
+      // USERS SUBCOLLECTION
+      // ============================================================================
+      
+      match /users/{userId} {
+        // Users can read their own profile and org members can read all
+        allow read: if isOrgMember(orgId);
+        
+        // Only admins can create/update/delete users
+        allow create, update, delete: if isAdmin(orgId);
+        
+        // Users can update their own profile (limited fields)
+        allow update: if isOwner(userId) && 
+                         isOrgMember(orgId) &&
+                         // Prevent role elevation
+                         request.resource.data.role == resource.data.role;
+      }
+      
+      // ============================================================================
+      // PROJECTS SUBCOLLECTION
+      // ============================================================================
+      
+      match /projects/{projectId} {
+        // All org members can read projects
+        allow read: if isOrgMember(orgId);
+        
+        // Supervisors and above can create/update projects
+        allow create, update: if isSupervisor(orgId) && isValidUpdate();
+        
+        // Only admins can delete projects
+        allow delete: if isAdmin(orgId);
+      }
+      
+      // ============================================================================
+      // TRA TEMPLATES SUBCOLLECTION
+      // ============================================================================
+      
+      match /traTemplates/{templateId} {
+        // All org members can read templates
+        allow read: if isOrgMember(orgId);
+        
+        // Safety managers and above can create/update templates
+        allow create, update: if isSafetyManager(orgId) && isValidUpdate();
+        
+        // Only admins can delete templates
+        allow delete: if isAdmin(orgId);
+      }
+      
+      // ============================================================================
+      // TRAs SUBCOLLECTION
+      // ============================================================================
+      
+      match /tras/{traId} {
+        // All org members can read TRAs
+        allow read: if isOrgMember(orgId);
+        
+        // Supervisors and above can create/update TRAs
+        allow create: if isSupervisor(orgId) && 
+                         request.resource.data.createdBy == request.auth.uid &&
+                         request.resource.data.createdAt == request.time;
+        
+        allow update: if isSupervisor(orgId) && 
+                         isValidUpdate() &&
+                         request.resource.data.updatedAt == request.time;
+        
+        // Only admins can delete TRAs
+        allow delete: if isAdmin(orgId);
+        
+        // TRA Comments subcollection
+        match /comments/{commentId} {
+          allow read: if isOrgMember(orgId);
+          allow create: if isOrgMember(orgId) && 
+                           request.resource.data.userId == request.auth.uid &&
+                           request.resource.data.createdAt == request.time;
+          allow update: if isOwner(resource.data.userId) && isOrgMember(orgId);
+          allow delete: if isOwner(resource.data.userId) || isAdmin(orgId);
+        }
+        
+        // TRA Approvals subcollection
+        match /approvals/{approvalId} {
+          allow read: if isOrgMember(orgId);
+          allow create: if isSupervisor(orgId) && 
+                           request.resource.data.approvedBy == request.auth.uid;
+          allow update: if false; // Approvals are immutable once created
+          allow delete: if isAdmin(orgId);
+        }
+      }
+      
+      // ============================================================================
+      // LMRA SESSIONS SUBCOLLECTION
+      // ============================================================================
+      
+      match /lmraSessions/{sessionId} {
+        // All org members can read LMRA sessions
+        allow read: if isOrgMember(orgId);
+        
+        // Any org member can create LMRA sessions
+        allow create: if isOrgMember(orgId) && 
+                         request.resource.data.performedBy == request.auth.uid &&
+                         request.resource.data.startedAt == request.time;
+        
+        // Only the creator or supervisors can update
+        allow update: if (isOwner(resource.data.performedBy) || isSupervisor(orgId)) &&
+                         isOrgMember(orgId) &&
+                         request.resource.data.performedBy == resource.data.performedBy &&
+                         request.resource.data.startedAt == resource.data.startedAt;
+        
+        // Only admins can delete
+        allow delete: if isAdmin(orgId);
+      }
+      
+      // ============================================================================
+      // HAZARDS LIBRARY SUBCOLLECTION
+      // ============================================================================
+      
+      match /hazards/{hazardId} {
+        // All org members can read hazards
+        allow read: if isOrgMember(orgId);
+        
+        // Safety managers can create/update hazards
+        allow create, update: if isSafetyManager(orgId);
+        
+        // Only admins can delete hazards
+        allow delete: if isAdmin(orgId);
+      }
+      
+      // ============================================================================
+      // CONTROL MEASURES LIBRARY SUBCOLLECTION
+      // ============================================================================
+      
+      match /controlMeasures/{measureId} {
+        // All org members can read control measures
+        allow read: if isOrgMember(orgId);
+        
+        // Safety managers can create/update control measures
+        allow create, update: if isSafetyManager(orgId);
+        
+        // Only admins can delete control measures
+        allow delete: if isAdmin(orgId);
+      }
+      
+      // ============================================================================
+      // AUDIT LOGS SUBCOLLECTION (Read-only for non-admins)
+      // ============================================================================
+      
+      match /auditLogs/{logId} {
+        // Admins and safety managers can read audit logs
+        allow read: if isSafetyManager(orgId);
+        
+        // System only (Cloud Functions) can create audit logs
+        allow create: if false; // Created via Cloud Functions only
+        
+        // Audit logs are immutable
+        allow update, delete: if false;
+      }
+      
+      // ============================================================================
+      // BILLING EVENTS SUBCOLLECTION (Read-only)
+      // ============================================================================
+      
+      match /billingEvents/{eventId} {
+        // Admins can read billing events
+        allow read: if isAdmin(orgId);
+        
+        // System only (webhooks) can create billing events
+        allow create: if false; // Created via Stripe webhooks only
+        
+        // Billing events are immutable
+        allow update, delete: if false;
+      }
+    }
+    
+    // ============================================================================
+    // GLOBAL COLLECTIONS (Not organization-specific)
+    // ============================================================================
+    
+    // User profiles (global, linked to Firebase Auth)
+    match /userProfiles/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
+      allow delete: if false; // Prevent accidental deletion
+    }
+    
+    // Invitation tokens (temporary, for user onboarding)
+    match /invitations/{invitationId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated(); // Admins create via Cloud Functions
+      allow update: if false; // Invitations are single-use
+      allow delete: if false; // Auto-deleted by Cloud Functions after use
+    }
+    
+    // Default deny for all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
