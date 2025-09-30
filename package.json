@@ -1,0 +1,22 @@
+{
+  "name": "safework-pro",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.10"
+  },
+  "lint-staged": {
+    "web/**/*.{js,jsx,ts,tsx}": [
+      "cd web && npm run lint:fix",
+      "cd web && npm run format",
+      "cd web && npx tsc --noEmit"
+    ],
+    "web/**/*.{json,md}": [
+      "cd web && npm run format"
+    ]
+  }
+}
